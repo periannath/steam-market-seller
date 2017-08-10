@@ -378,15 +378,15 @@
     }
 
     function calculateSellPrice_mode(sell_order, listings) {
-        // Select most ordering price from first 5 sell orders
-        var ordercount = 5;
+        // Select most ordering price from first 10 sell orders
+        var ordercount = 10;
         ordercount = sell_order.length < ordercount ? sell_order.length : ordercount;
 
         var maxorder = sell_order[0][1];
         var index = 0;
         for (var i = 1; i < ordercount; i++ ) {
             var order = sell_order[i][1] - sell_order[i-1][1];
-            if ( order > maxorder ) {
+            if ( (order > maxorder) || ((order == maxorder) && (order != 1)) ) {
                 maxorder = order;
                 index = i;
             }
