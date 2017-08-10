@@ -2,7 +2,7 @@
 // @name           Steam market seller
 // @namespace      https://github.com/tboothman/steam-market-seller
 // @description    Quickly sell items on steam market
-// @version        0.7.2
+// @version        0.7.3
 // @include        http://steamcommunity.com/id/*/inventory*
 // @include        http://steamcommunity.com/profiles/*/inventory*
 // @include        https://steamcommunity.com/id/*/inventory*
@@ -156,6 +156,29 @@
         }
     };
 
+    // http://steamcommunity.com/market/itemordershistogram?country=KR&language=english&currency=16&item_nameid=175902227&two_factor=0
+    SteamMarket.prototype.getOrderHistogram = function(item, nameid, callback) {
+        try {
+            var url = 'http://steamcommunity.com/market/itemordershistogram';
+            url += '?country=' + g_rgWalletInfo.wallet_country;
+            url += '&language=english';
+            url += '&currency=' + g_rgWalletInfo.wallet_currency;
+            url += '&item_nameid=' + nameid;
+            $.get(url, function(data) {
+                if (!data || !data.success || !data.sell_order_graph) {
+                    return callback(true);
+                }
+                // Multiply out prices so they're in pennies
+                for (var i = 0; i < data.sell_order_graph.length; i++) {
+                    data.sell_order_graph[i][0] *= 100;
+                }
+                callback(null, data.sell_order_graph)
+            }, 'json');
+        } catch (e) {
+            return callback(true);
+        }
+    }
+
     // Get the sales listings for this item in the market
     // Listings is a list of listing objects.
     // converted_price and converted_fee are the useful bits of info
@@ -180,13 +203,14 @@
             var url = 'http://steamcommunity.com/market/listings/';
             url += item.appid + '/' + encodeURIComponent(item.market_hash_name);
             $.get(url, function(page) {
-                
                 var matches = /var g_rgListingInfo = (.+);/.exec(page);
+                var idmatches = /Market_LoadOrderSpread\( (\d+) \);/.exec(page);
                 var listingInfo = JSON.parse(matches[1]);
+                var nameid = idmatches[1];
                 if (!listingInfo) {
                     return callback(true);
                 }
-                callback(null, listingInfo);
+                callback(null, listingInfo, nameid);
             }).fail(function() {
                 return callback(true);
             });
@@ -293,11 +317,6 @@
         return null;
     }
 
-
-
-
-
-
     function log(text) {
         logEl.innerHTML += text + '<br/>';
     }
@@ -306,8 +325,9 @@
         logEl.innerHTML = '';
     }
 
-    function calculateSellPrice(history, listings) {
-        return calculateSellPrice_safe(history, listings);
+    function calculateSellPrice(history, sell_order, listings) {
+        //return calculateSellPrice_safe(history, listings);
+        return calculateSellPrice_mode(sell_order, listings);
         //return calculateSellPrice_undercut(history, listings);
         //return calculateSellPrice_matchlowest(history, listings);
     }
@@ -354,6 +374,28 @@
             return firstListing.converted_price - 1;
         } else {
             return market.getPriceBeforeFees(highestAverage);
+        }
+    }
+
+    function calculateSellPrice_mode(sell_order, listings) {
+        // Select most ordering price from first 5 sell orders
+        var ordercount = 5;
+        ordercount = sell_order.length < ordercount ? sell_order.length : ordercount;
+
+        var maxorder = sell_order[0][1];
+        var index = 0;
+        for (var i = 1; i < ordercount; i++ ) {
+            var order = sell_order[i][1] - sell_order[i-1][1];
+            if ( order > maxorder ) {
+                maxorder = order;
+                index = i;
+            }
+        }
+
+        if (index == 0 ) {
+            return market.getPriceBeforeFees(sell_order[0][0])-1;
+        } else {
+            return market.getPriceBeforeFees(sell_order[index][0])-1;
         }
     }
 
@@ -431,39 +473,45 @@
                 next();
                 return;
             }
-
-            market.getPriceHistory(item, function(err, history) {
+            market.getListings(item, function(err, listings, nameid) {
                 if (err) {
-                    console.log('Failed to get price history for ' + item.name);
+                    console.log('Failed to get listings for ' + item.name);
                     next();
                     return;
                 }
-                market.getListings(item, function(err, listings) {
+                market.getOrderHistogram(item, nameid, function(err, sell_order) {
                     if (err) {
-                        console.log('Failed to get listings for ' + item.name);
+                        console.log('Failed to get histogram for ' + item.name);
                         next();
                         return;
                     }
-                    console.log('============================')
-                    console.log(item.name);
-                    console.log('Average sell price, last hour: ' + market.getPriceBeforeFees(history[history.length - 1][1]) + ' (' + history[history.length - 1][1] + ')');
-                    if (Object.keys(listings).length === 0) {
-                        console.log('Not listed for sale');
-                        next();
-                        return;
-                    }
-                    var firstListing = listings[Object.keys(listings)[0]];
-                    console.log('First listing price: ' + firstListing.converted_price + ' (' + (firstListing.converted_price + firstListing.converted_fee) + ')');
+                    market.getPriceHistory(item, function(err, history) {
+                        if (err) {
+                            console.log('Failed to get price history for ' + item.name);
+                            next();
+                            return;
+                        }
+                        console.log('============================')
+                        console.log(item.name);
+                        console.log('Average sell price, last hour: ' + market.getPriceBeforeFees(history[history.length - 1][1]) + ' (' + history[history.length - 1][1] + ')');
+                        if (Object.keys(listings).length === 0) {
+                            console.log('Not listed for sale');
+                            next();
+                            return;
+                        }
+                        var firstListing = listings[Object.keys(listings)[0]];
+                        console.log('First listing price: ' + firstListing.converted_price + ' (' + (firstListing.converted_price + firstListing.converted_fee) + ')');
 
-                    var sellPrice = calculateSellPrice(history, listings);
-                    console.log('Calculated sell price: ' + sellPrice + ' (' + market.getPriceIncludingFees(sellPrice) + ')');
-                    if (sellPrice > 0) {
-                        sellQueue.push({
-                            item: item,
-                            sellPrice: sellPrice
-                        });
-                    }
-                    next();
+                        var sellPrice = calculateSellPrice(history, sell_order, listings);
+                        console.log('Calculated sell price: ' + sellPrice + ' (' + market.getPriceIncludingFees(sellPrice) + ')');
+                        if (sellPrice > 0) {
+                            sellQueue.push({
+                                item: item,
+                                sellPrice: sellPrice
+                            });
+                        }
+                        next();
+                    });
                 });
             });
         }, 2);
